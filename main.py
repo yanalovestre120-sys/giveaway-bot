@@ -1860,6 +1860,18 @@ async def help(ctx):
         )
     )
     emb.add_field(
+        name="🎁 Gift Hub (Perm 3+)",
+        value=(
+            "`+gcreate <duration> [winners] <prize>` — start a gift\n"
+            "`+gend [message_id]` — end gift & pick winners (or reply)\n"
+            "`+greroll [message_id]` — reroll winners (or reply)\n"
+            "`+glist` — list active gifts\n"
+            "`+gcancel [message_id]` — cancel gift (Perm 4+)\n"
+            "Example: `+gcreate 1h 1 Discord Nitro`"
+        ),
+        inline=False
+    )
+    emb.add_field(
         name="Perm 1",
         value="`+help` `+warn <member> [reason]` `+mutelist` `+perms` `+sanctions <member>` `+tempmute <member> <duration> [reason]` `+unmute <member>`",
         inline=False
@@ -1870,16 +1882,13 @@ async def help(ctx):
         inline=False
     )
     emb.add_field(
-        name="Perm 3 — Gift Hub + mod",
-        value=(
-            "`+gcreate <duration> [winners] <prize>` `+gend` `+greroll` `+glist`\n"
-            "`+derank <member>` `+clearwarns <member>` `+addrole <member> <role>` `+delrole <member> <role>`"
-        ),
+        name="Perm 3",
+        value="`+derank <member>` `+clearwarns <member>` `+addrole <member> <role>` `+delrole <member> <role>`",
         inline=False
     )
     emb.add_field(
         name="Perm 4",
-        value="`+clear [number] [member]` `+create [emoji] [name]` `+gcancel`",
+        value="`+clear [number] [member]` `+create [emoji] [name]`",
         inline=False
     )
     emb.add_field(
