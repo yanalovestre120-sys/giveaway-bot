@@ -1041,27 +1041,37 @@ async def clear(ctx, *args):
         clearing_channels.discard(ctx.channel.id)
 
 def find_role(guild, role_query: str):
-    if not role_query:
+    if not role_query or not guild:
         return None
     q = role_query.strip()
+    # Role mention <@&id>
     if q.startswith("<@&") and q.endswith(">"):
         rid = q[3:-1]
         if rid.isdigit():
             return guild.get_role(int(rid))
+    # Bare role id
     if q.isdigit():
         role = guild.get_role(int(q))
         if role:
             return role
+    # Strip leading @ if user typed @RoleName as text
+    if q.startswith("@"):
+        q = q[1:].strip()
+    if not q:
+        return None
     q_lower = q.lower()
+    # Exact name match
     role = discord.utils.find(lambda r: r.name.lower() == q_lower, guild.roles)
     if role:
         return role
+    # Starts with
     starts = [r for r in guild.roles if r.name.lower().startswith(q_lower) and r.name != "@everyone"]
     if len(starts) == 1:
         return starts[0]
     if len(starts) > 1:
         starts.sort(key=lambda r: len(r.name))
         return starts[0]
+    # Contains
     contains = [r for r in guild.roles if q_lower in r.name.lower() and r.name != "@everyone"]
     if len(contains) == 1:
         return contains[0]
@@ -1069,6 +1079,7 @@ def find_role(guild, role_query: str):
         contains.sort(key=lambda r: (len(r.name), r.name.lower()))
         return contains[0]
     return None
+
 
 @bot.command()
 async def temprole(ctx, *, args: str = None):
@@ -1149,103 +1160,120 @@ async def temprole(ctx, *, args: str = None):
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
-@bot.command()
-async def addrole(ctx, *, args: str = None):
-    if not has_perm(ctx.author, get_cmd_perm("addrole")):
-        return
-    if not args:
-        return await ctx.send("invalid addrole")
+async def _resolve_member_and_role(ctx, args: str):
+    """Resolve target member + role from mentions, reply, ids, or names.
+    Supports: +addrole @user @Role | +addrole @user Role Name | +addrole userid Role
+    """
     user = None
-    role_name = None
+    role = None
+    rest = (args or "").strip()
+
+    # Role ping takes priority
+    if ctx.message.role_mentions:
+        role = ctx.message.role_mentions[0]
+        for r in ctx.message.role_mentions:
+            rest = rest.replace(f"<@&{r.id}>", "")
+
+    # User ping
     if ctx.message.mentions:
         user = ctx.message.mentions[0]
-        role_name = args
         for m in ctx.message.mentions:
-            role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
-        role_name = role_name.strip()
-    elif ctx.message.reference:
+            rest = rest.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+
+    rest = rest.strip()
+
+    # Reply as target user
+    if user is None and ctx.message.reference:
         user = await get_target(ctx, None)
-        role_name = args.strip()
-    else:
-        parts = args.split(None, 1)
-        if len(parts) >= 1 and parts[0].isdigit() and ctx.guild and ctx.guild.get_member(int(parts[0])):
-            user = await get_target(ctx, parts[0])
-            role_name = parts[1] if len(parts) > 1 else None
-        elif len(parts) == 1 and parts[0].isdigit() and find_role(ctx.guild, parts[0]):
-            user = ctx.author
-            role_name = parts[0]
-        else:
-            user = ctx.author
-            role_name = args.strip()
-    if not user or not role_name:
-        return await ctx.send("invalid addrole")
-    member = await get_member(ctx.guild, user)
+
+    # Still need a role from leftover text
+    if role is None and rest:
+        # Try full rest as role name first
+        role = find_role(ctx.guild, rest)
+        if role is None and user is None:
+            # Maybe: <userid/name> <role...>
+            parts = rest.split(None, 1)
+            if len(parts) >= 2:
+                maybe_user = await get_target(ctx, parts[0])
+                maybe_role = find_role(ctx.guild, parts[1])
+                if maybe_user and maybe_role:
+                    user = maybe_user
+                    role = maybe_role
+                    rest = ""
+                elif maybe_role:
+                    role = maybe_role
+            elif len(parts) == 1 and parts[0].isdigit():
+                # only an id — could be role id
+                role = find_role(ctx.guild, parts[0])
+
+    # Default user = author only if role was found and no user specified
+    if user is None and role is not None and not ctx.message.mentions and not ctx.message.reference:
+        # If rest still looks like a user id we already tried; default to author
+        user = ctx.author
+
+    member = await get_member(ctx.guild, user) if user else None
+    return member, role
+
+
+@bot.command()
+async def addrole(ctx, *, args: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("addrole")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    if not args and not ctx.message.role_mentions and not ctx.message.reference:
+        return await ctx.send("Usage: `+addrole @user @Role` or `+addrole @user Role Name`")
+    member, role = await _resolve_member_and_role(ctx, args or "")
     if not member:
-        return await ctx.send("invalid addrole")
-    role = find_role(ctx.guild, role_name)
+        return await ctx.send("Could not find that member.")
     if not role:
-        return await ctx.send("invalid addrole")
-    # Only Perm 6 / owner / special can assign roles >= their own top role
-    if role >= ctx.author.top_role:
-        if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
-            return await ctx.send("invalid addrole")
+        return await ctx.send("Could not find that role. Ping the role or type its exact name.")
+    # Hierarchy: special / owner / perm 6 can assign any role below the bot
+    is_privileged = (
+        ctx.author.id == ctx.guild.owner_id
+        or str(ctx.author.id) in SPECIAL_USERS
+        or has_perm(ctx.author, 6)
+    )
+    if not is_privileged and role >= ctx.author.top_role:
+        return await ctx.send("That role is equal/higher than your highest role.")
     if role >= ctx.guild.me.top_role:
-        return await ctx.send("invalid addrole")
+        return await ctx.send("My role is too low — move my role **above** that role in Server Settings.")
     if role in member.roles:
-        return await ctx.send(f"{member.mention} already has the {role.mention} role.")
+        return await ctx.send(f"{member.mention} already has **{role.name}**.")
     try:
-        await member.add_roles(role)
-        await ctx.send("1 role was added to 1 member")
+        await member.add_roles(role, reason=f"addrole by {ctx.author}")
+        await ctx.send(f"Added **{role.name}** to {member.mention}")
+    except discord.Forbidden:
+        await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
+
 @bot.command()
 async def delrole(ctx, *, args: str = None):
-    if not has_perm(ctx.author, get_cmd_perm("delrole")):
+    if not has_perm(ctx.author, get_cmd_perm("delrole")) and str(ctx.author.id) not in SPECIAL_USERS:
         return
-    if not args:
-        return await ctx.send("invalid delrole")
-    user = None
-    role_name = None
-    if ctx.message.mentions:
-        user = ctx.message.mentions[0]
-        role_name = args
-        for m in ctx.message.mentions:
-            role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
-        role_name = role_name.strip()
-    elif ctx.message.reference:
-        user = await get_target(ctx, None)
-        role_name = args.strip()
-    else:
-        parts = args.split(None, 1)
-        if len(parts) >= 1 and parts[0].isdigit() and ctx.guild and ctx.guild.get_member(int(parts[0])):
-            user = await get_target(ctx, parts[0])
-            role_name = parts[1] if len(parts) > 1 else None
-        elif len(parts) == 1 and parts[0].isdigit() and find_role(ctx.guild, parts[0]):
-            user = ctx.author
-            role_name = parts[0]
-        else:
-            user = ctx.author
-            role_name = args.strip()
-    if not user or not role_name:
-        return await ctx.send("invalid delrole")
-    member = await get_member(ctx.guild, user)
+    if not args and not ctx.message.role_mentions and not ctx.message.reference:
+        return await ctx.send("Usage: `+delrole @user @Role` or `+delrole @user Role Name`")
+    member, role = await _resolve_member_and_role(ctx, args or "")
     if not member:
-        return await ctx.send("invalid delrole")
-    role = find_role(ctx.guild, role_name)
+        return await ctx.send("Could not find that member.")
     if not role:
-        return await ctx.send("invalid delrole")
-    # Only Perm 6 / owner / special can manage roles >= their own top role
-    if role >= ctx.author.top_role:
-        if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
-            return await ctx.send("invalid delrole")
+        return await ctx.send("Could not find that role. Ping the role or type its exact name.")
+    is_privileged = (
+        ctx.author.id == ctx.guild.owner_id
+        or str(ctx.author.id) in SPECIAL_USERS
+        or has_perm(ctx.author, 6)
+    )
+    if not is_privileged and role >= ctx.author.top_role:
+        return await ctx.send("That role is equal/higher than your highest role.")
     if role >= ctx.guild.me.top_role:
-        return await ctx.send("invalid delrole")
+        return await ctx.send("My role is too low — move my role **above** that role in Server Settings.")
     if role not in member.roles:
-        return await ctx.send(f"{member.mention} does not have the {role.mention} role.")
+        return await ctx.send(f"{member.mention} does not have **{role.name}**.")
     try:
-        await member.remove_roles(role)
-        await ctx.send("1 rôle was successfully removed from 1 member")
+        await member.remove_roles(role, reason=f"delrole by {ctx.author}")
+        await ctx.send(f"Removed **{role.name}** from {member.mention}")
+    except discord.Forbidden:
+        await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
