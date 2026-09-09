@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 TOKEN = os.environ["TOKEN"]
 PREFIX = "+"
 WELCOME_CHANNEL_ID = 1547032394136031293
+AUTOROLE_ID = 1546996783102697563  # members — given on join
 
 SPECIAL_USERS = [
     "1223210346995777579",
@@ -416,6 +417,15 @@ async def on_member_join(member):
         except Exception:
             pass
         return
+
+    # Auto role — members
+    try:
+        role = member.guild.get_role(AUTOROLE_ID)
+        if role and role not in member.roles:
+            await member.add_roles(role, reason="Auto role on join")
+    except Exception as e:
+        print(f"Autorole failed: {e}")
+
     try:
         ch = bot.get_channel(WELCOME_CHANNEL_ID)
         if ch is None:
@@ -1240,7 +1250,7 @@ async def addrole(ctx, *, args: str = None):
         return await ctx.send(f"{member.mention} already has **{role.name}**.")
     try:
         await member.add_roles(role, reason=f"addrole by {ctx.author}")
-        await ctx.send(f"Added **{role.name}** to {member.mention}")
+        await ctx.send("1 role was added to 1 member")
     except discord.Forbidden:
         await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
@@ -1271,7 +1281,7 @@ async def delrole(ctx, *, args: str = None):
         return await ctx.send(f"{member.mention} does not have **{role.name}**.")
     try:
         await member.remove_roles(role, reason=f"delrole by {ctx.author}")
-        await ctx.send(f"Removed **{role.name}** from {member.mention}")
+        await ctx.send("1 rôle was successfully removed from 1 member")
     except discord.Forbidden:
         await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
