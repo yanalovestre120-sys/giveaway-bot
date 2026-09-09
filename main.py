@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==================== CONFIG ====================
-TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+TOKEN = os.environ["TOKEN"]
 PREFIX = "+"
 WELCOME_CHANNEL_ID = 1547032394136031293
 
@@ -99,6 +99,7 @@ SNIPE_FILE = "data/snipe.json"
 ROLE_PERMS_FILE = "data/role_perms.json"
 TEMPROLES_FILE = "data/temproles.json"
 COMMAND_PERMS_FILE = "data/command_perms.json"
+GIFTS_FILE = "data/gifts.json"
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -118,6 +119,8 @@ role_perms = load_json(ROLE_PERMS_FILE, {})
 temproles_data = load_json(TEMPROLES_FILE, [])
 _temprole_tasks = {}
 command_overrides = load_json(COMMAND_PERMS_FILE, {})
+gifts_data = load_json(GIFTS_FILE, {})  # message_id -> gift dict
+_gift_tasks = {}
 
 # Default required perm level per command (overridable via +changeperm)
 DEFAULT_COMMAND_PERMS = {
@@ -135,6 +138,11 @@ DEFAULT_COMMAND_PERMS = {
     "delrole": 3,
     "clear": 4,
     "create": 4,
+    "gcreate": 3,   # low tier gw manager+
+    "gend": 3,
+    "greroll": 3,
+    "glist": 3,
+    "gcancel": 4,
     "temprole": 6,
     "syncroles": 6,
     "modstats": 6,
@@ -154,6 +162,7 @@ def save_snipe(): save_json(SNIPE_FILE, snipe_data)
 def save_role_perms(): save_json(ROLE_PERMS_FILE, role_perms)
 def save_temproles(): save_json(TEMPROLES_FILE, temproles_data)
 def save_command_perms(): save_json(COMMAND_PERMS_FILE, command_overrides)
+def save_gifts(): save_json(GIFTS_FILE, gifts_data)
 
 def get_cmd_perm(name: str) -> int:
     key = name.lower().strip()
@@ -266,7 +275,7 @@ async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Streaming(
-            name="online",
+            name="SAB giveaways",
             url="https://www.twitch.tv/discord"
         )
     )
@@ -281,6 +290,11 @@ async def on_ready():
         print(f"Temp roles restored: {len(temproles_data)} pending")
     except Exception as e:
         print(f"Temp role restore failed: {e}")
+    try:
+        await restore_gifts()
+        print(f"Gifts restored: {len([g for g in gifts_data.values() if g.get('active')])} active")
+    except Exception as e:
+        print(f"Gift restore failed: {e}")
 
 # ==================== EVENTS (all the rest) ====================
 @bot.event
@@ -1491,6 +1505,350 @@ async def changeperm(ctx, command: str = None, level: str = None):
     save_command_perms()
     await ctx.send(f"Permission for `{cmd}` set to **Perm {lvl}**.")
 
+# ==================== GIFT HUB ====================
+GIFT_EMOJI = "🎁"
+
+def _gift_key(message_id) -> str:
+    return str(message_id)
+
+async def _build_gift_embed(gift: dict, ended: bool = False) -> discord.Embed:
+    ends_at = gift.get("ends_at")
+    try:
+        ends_dt = datetime.fromisoformat(ends_at) if ends_at else None
+        if ends_dt and ends_dt.tzinfo is None:
+            ends_dt = ends_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        ends_dt = None
+    winners_n = int(gift.get("winners", 1))
+    prize = gift.get("prize", "Gift")
+    host_id = gift.get("host_id")
+    entries = gift.get("entries", [])
+    title = "🎁 Gift Ended" if ended else "🎁 Gift Giveaway"
+    emb = discord.Embed(title=title, color=0x000000, timestamp=datetime.now(timezone.utc))
+    emb.add_field(name="Prize", value=prize, inline=False)
+    emb.add_field(name="Winners", value=str(winners_n), inline=True)
+    emb.add_field(name="Entries", value=str(len(entries)), inline=True)
+    if host_id:
+        emb.add_field(name="Hosted by", value=f"<@{host_id}>", inline=True)
+    if ends_dt and not ended:
+        emb.add_field(name="Ends", value=discord.utils.format_dt(ends_dt, "R"), inline=False)
+        emb.description = f"React with {GIFT_EMOJI} to enter!"
+    if ended:
+        winner_ids = gift.get("winner_ids") or []
+        if winner_ids:
+            mentions = ", ".join(f"<@{w}>" for w in winner_ids)
+            emb.add_field(name="Winner(s)", value=mentions, inline=False)
+        else:
+            emb.add_field(name="Winner(s)", value="No valid entries", inline=False)
+    emb.set_footer(text="Founder: Raynox • Bot maker: Teix • Gift Hub")
+    return emb
+
+def _pick_winners(entries: list, count: int, exclude: list = None) -> list:
+    import random
+    pool = list(dict.fromkeys(entries))  # unique, preserve order then shuffle
+    if exclude:
+        exclude_set = set(str(x) for x in exclude)
+        pool = [e for e in pool if str(e) not in exclude_set]
+    if not pool:
+        return []
+    random.shuffle(pool)
+    return pool[: max(1, min(count, len(pool)))]
+
+async def _end_gift(message_id: str, cancelled: bool = False):
+    gift = gifts_data.get(str(message_id))
+    if not gift or not gift.get("active"):
+        return
+    gift["active"] = False
+    key = _gift_key(message_id)
+    task = _gift_tasks.pop(key, None)
+    if task and not task.done():
+        task.cancel()
+
+    channel_id = gift.get("channel_id")
+    guild_id = gift.get("guild_id")
+    winners_n = int(gift.get("winners", 1))
+    entries = list(gift.get("entries") or [])
+
+    if cancelled:
+        gift["winner_ids"] = []
+        gift["cancelled"] = True
+    else:
+        gift["winner_ids"] = _pick_winners(entries, winners_n)
+        gift["cancelled"] = False
+
+    save_gifts()
+
+    ch = bot.get_channel(channel_id) if channel_id else None
+    if ch is None and channel_id:
+        try:
+            ch = await bot.fetch_channel(channel_id)
+        except Exception:
+            ch = None
+    if not ch:
+        return
+    try:
+        msg = await ch.fetch_message(int(message_id))
+    except Exception:
+        msg = None
+
+    emb = await _build_gift_embed(gift, ended=True)
+    if cancelled:
+        emb.title = "🎁 Gift Cancelled"
+        emb.color = 0x000000
+    if msg:
+        try:
+            await msg.edit(embed=emb)
+        except Exception:
+            pass
+        try:
+            await msg.clear_reactions()
+        except Exception:
+            pass
+
+    if not cancelled and gift.get("winner_ids"):
+        mentions = ", ".join(f"<@{w}>" for w in gift["winner_ids"])
+        try:
+            await ch.send(
+                f"🎉 Congratulations {mentions}! You won **{gift.get('prize', 'the gift')}**!\n"
+                f"Host: <@{gift.get('host_id')}> — please arrange delivery."
+            )
+        except Exception:
+            pass
+    elif not cancelled:
+        try:
+            await ch.send("🎁 Gift ended with no valid entries.")
+        except Exception:
+            pass
+
+def schedule_gift_end(message_id: str, ends_at: datetime):
+    import asyncio
+    key = _gift_key(message_id)
+    old = _gift_tasks.pop(key, None)
+    if old and not old.done():
+        old.cancel()
+    now = datetime.now(timezone.utc)
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    delay = max(0, (ends_at - now).total_seconds())
+
+    async def _runner():
+        try:
+            await asyncio.sleep(delay)
+            await _end_gift(message_id)
+        except asyncio.CancelledError:
+            return
+
+    _gift_tasks[key] = asyncio.create_task(_runner())
+
+async def restore_gifts():
+    now = datetime.now(timezone.utc)
+    for mid, gift in list(gifts_data.items()):
+        if not gift.get("active"):
+            continue
+        try:
+            ends = datetime.fromisoformat(gift["ends_at"])
+            if ends.tzinfo is None:
+                ends = ends.replace(tzinfo=timezone.utc)
+            if ends <= now:
+                await _end_gift(mid)
+            else:
+                schedule_gift_end(mid, ends)
+        except Exception as e:
+            print(f"gift restore error {mid}: {e}")
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == (bot.user.id if bot.user else None):
+        return
+    if str(payload.emoji) != GIFT_EMOJI and getattr(payload.emoji, "name", None) != "🎁":
+        return
+    mid = str(payload.message_id)
+    gift = gifts_data.get(mid)
+    if not gift or not gift.get("active"):
+        return
+    if payload.guild_id and gift.get("guild_id") and int(gift["guild_id"]) != payload.guild_id:
+        return
+    uid = str(payload.user_id)
+    entries = gift.setdefault("entries", [])
+    if uid not in entries:
+        entries.append(uid)
+        save_gifts()
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if str(payload.emoji) != GIFT_EMOJI and getattr(payload.emoji, "name", None) != "🎁":
+        return
+    mid = str(payload.message_id)
+    gift = gifts_data.get(mid)
+    if not gift or not gift.get("active"):
+        return
+    uid = str(payload.user_id)
+    entries = gift.get("entries") or []
+    if uid in entries:
+        gift["entries"] = [e for e in entries if e != uid]
+        save_gifts()
+
+@bot.command(aliases=["gstart", "giveaway"])
+async def gcreate(ctx, duration: str = None, winners: str = "1", *, prize: str = None):
+    """Create a gift: +gcreate <duration> [winners] <prize>
+    Example: +gcreate 1h 1 Nitro Classic
+    """
+    if not has_perm(ctx.author, get_cmd_perm("gcreate")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    if not duration or not prize:
+        return await ctx.send("Usage: `+gcreate <duration> [winners] <prize>`\nExample: `+gcreate 30m 1 Discord Nitro`")
+    delta = parse_duration(duration)
+    if not delta or delta.total_seconds() < 10:
+        return await ctx.send("Invalid duration (examples: `30s` `10m` `1h` `7d`)")
+    try:
+        winners_n = int(winners)
+        if winners_n < 1 or winners_n > 20:
+            raise ValueError()
+    except Exception:
+        # winners omitted — treat winners token as part of prize
+        prize = f"{winners} {prize}".strip()
+        winners_n = 1
+    ends_at = datetime.now(timezone.utc) + delta
+    gift_stub = {
+        "prize": prize,
+        "winners": winners_n,
+        "host_id": ctx.author.id,
+        "entries": [],
+        "ends_at": ends_at.isoformat(),
+        "active": True,
+        "channel_id": ctx.channel.id,
+        "guild_id": ctx.guild.id if ctx.guild else None,
+        "winner_ids": [],
+    }
+    emb = await _build_gift_embed(gift_stub, ended=False)
+    msg = await ctx.send(embed=emb)
+    try:
+        await msg.add_reaction(GIFT_EMOJI)
+    except Exception:
+        pass
+    gift_stub["message_id"] = msg.id
+    gifts_data[str(msg.id)] = gift_stub
+    save_gifts()
+    schedule_gift_end(str(msg.id), ends_at)
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+@bot.command()
+async def gend(ctx, message_id: str = None):
+    """End a gift early and pick winners. Reply to the gift or pass message ID."""
+    if not has_perm(ctx.author, get_cmd_perm("gend")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    mid = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        mid = str(ctx.message.reference.message_id)
+    elif message_id and message_id.isdigit():
+        mid = message_id.strip()
+    if not mid or mid not in gifts_data:
+        return await ctx.send("Reply to a gift message or use `+gend <message_id>`")
+    gift = gifts_data[mid]
+    if not gift.get("active"):
+        return await ctx.send("That gift is already ended.")
+    await _end_gift(mid)
+    await ctx.send("Gift ended and winners picked.")
+
+@bot.command()
+async def gcancel(ctx, message_id: str = None):
+    """Cancel a gift without picking winners."""
+    if not has_perm(ctx.author, get_cmd_perm("gcancel")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    mid = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        mid = str(ctx.message.reference.message_id)
+    elif message_id and message_id.isdigit():
+        mid = message_id.strip()
+    if not mid or mid not in gifts_data:
+        return await ctx.send("Reply to a gift message or use `+gcancel <message_id>`")
+    gift = gifts_data[mid]
+    if not gift.get("active"):
+        return await ctx.send("That gift is already ended.")
+    await _end_gift(mid, cancelled=True)
+    await ctx.send("Gift cancelled.")
+
+@bot.command()
+async def greroll(ctx, message_id: str = None):
+    """Reroll winner(s) for an ended gift. Reply to the gift or pass message ID."""
+    if not has_perm(ctx.author, get_cmd_perm("greroll")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    mid = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        mid = str(ctx.message.reference.message_id)
+    elif message_id and message_id.isdigit():
+        mid = message_id.strip()
+    if not mid or mid not in gifts_data:
+        return await ctx.send("Reply to a gift message or use `+greroll <message_id>`")
+    gift = gifts_data[mid]
+    if gift.get("active"):
+        return await ctx.send("Gift is still active — use `+gend` first.")
+    entries = list(gift.get("entries") or [])
+    winners_n = int(gift.get("winners", 1))
+    old = list(gift.get("winner_ids") or [])
+    new_winners = _pick_winners(entries, winners_n, exclude=old)
+    if not new_winners:
+        # if no one left excluding old, pick from all
+        new_winners = _pick_winners(entries, winners_n)
+    if not new_winners:
+        return await ctx.send("No entries to reroll.")
+    gift["winner_ids"] = new_winners
+    save_gifts()
+    emb = await _build_gift_embed(gift, ended=True)
+    emb.title = "🎁 Gift Rerolled"
+    ch = bot.get_channel(gift.get("channel_id"))
+    if ch is None and gift.get("channel_id"):
+        try:
+            ch = await bot.fetch_channel(gift["channel_id"])
+        except Exception:
+            ch = None
+    if ch:
+        try:
+            msg = await ch.fetch_message(int(mid))
+            await msg.edit(embed=emb)
+        except Exception:
+            pass
+        mentions = ", ".join(f"<@{w}>" for w in new_winners)
+        await ch.send(
+            f"🔄 Reroll! New winner(s): {mentions} — **{gift.get('prize', 'gift')}**"
+        )
+    await ctx.send("Rerolled.")
+
+@bot.command()
+async def glist(ctx):
+    """List active gifts in this server."""
+    if not has_perm(ctx.author, get_cmd_perm("glist")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return
+    active = []
+    gid = ctx.guild.id if ctx.guild else None
+    for mid, g in gifts_data.items():
+        if not g.get("active"):
+            continue
+        if gid and g.get("guild_id") and int(g["guild_id"]) != gid:
+            continue
+        active.append((mid, g))
+    if not active:
+        return await ctx.send("No active gifts.")
+    lines = []
+    for mid, g in active[:20]:
+        prize = g.get("prize", "?")
+        entries = len(g.get("entries") or [])
+        ends = g.get("ends_at", "")
+        try:
+            ends_dt = datetime.fromisoformat(ends)
+            if ends_dt.tzinfo is None:
+                ends_dt = ends_dt.replace(tzinfo=timezone.utc)
+            ends_txt = discord.utils.format_dt(ends_dt, "R")
+        except Exception:
+            ends_txt = ends
+        lines.append(f"**{prize}** — `{mid}` — {entries} entries — ends {ends_txt}")
+    emb = discord.Embed(title="Active Gifts", description="\n".join(lines), color=0x000000)
+    emb.set_footer(text="Founder: Raynox • Bot maker: Teix • Gift Hub")
+    await ctx.send(embed=emb)
+
 @bot.command()
 async def help(ctx):
     emb = discord.Embed(
@@ -1512,13 +1870,16 @@ async def help(ctx):
         inline=False
     )
     emb.add_field(
-        name="Perm 3",
-        value="`+derank <member>` `+clearwarns <member>` `+addrole <member> <role>` `+delrole <member> <role>`",
+        name="Perm 3 — Gift Hub + mod",
+        value=(
+            "`+gcreate <duration> [winners] <prize>` `+gend` `+greroll` `+glist`\n"
+            "`+derank <member>` `+clearwarns <member>` `+addrole <member> <role>` `+delrole <member> <role>`"
+        ),
         inline=False
     )
     emb.add_field(
         name="Perm 4",
-        value="`+clear [number] [member]` `+create [emoji] [name]`",
+        value="`+clear [number] [member]` `+create [emoji] [name]` `+gcancel`",
         inline=False
     )
     emb.add_field(
@@ -1541,7 +1902,7 @@ async def help(ctx):
         value="`+userinfo` `+serverinfo` `+snipe` `+ping`",
         inline=False
     )
-    emb.set_footer(text="Moderation bot")
+    emb.set_footer(text="Founder: Raynox • Bot maker: Teix")
     await ctx.send(embed=emb)
 
 def censor_blacklisted(text: str) -> str:
