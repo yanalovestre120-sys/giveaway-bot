@@ -47,8 +47,9 @@ ROLES = {
         "ids": [
             1547028673503428628,  # low tear gw manager
             1547028347190644806,  # mid tear gw manager
+            1548387214285742350,  # robux gw manager
         ],
-        "names": ["low tear gw manager", "mid tear gw manager"],
+        "names": ["low tear gw manager", "mid tear gw manager", "robux gw manager"],
     },
     4: {
         "ids": [1547028212859805836],  # high tear gw manager
