@@ -8,10 +8,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==================== CONFIG ====================
-TOKEN = os.environ["TOKEN"]
+TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 PREFIX = "+"
 WELCOME_CHANNEL_ID = 1547032394136031293
-AUTOROLE_ID = 1546996783102697563  # members — given on join
 
 SPECIAL_USERS = [
     "1223210346995777579",
@@ -45,20 +44,22 @@ ROLES = {
         "names": ["provider finder"],
     },
     3: {
-        "ids": [1547028673503428628],  # low tear gw manager
-        "names": ["low tear gw manager"],
+        "ids": [
+            1547028673503428628,  # low tear gw manager
+            1547028347190644806,  # mid tear gw manager
+        ],
+        "names": ["low tear gw manager", "mid tear gw manager"],
     },
     4: {
-        "ids": [1547028347190644806],  # mid tear gw manager
-        "names": ["mid tear gw manager"],
+        "ids": [1547028212859805836],  # high tear gw manager
+        "names": ["high tear gw manager"],
     },
     5: {
         "ids": [
             1546989569071775785,  # main helper
             1546995760111943772,  # gw manager
-            1547028212859805836,  # high tear gw manager
         ],
-        "names": ["main helper", "gw manager", "high tear gw manager"],
+        "names": ["main helper", "gw manager"],
     },
     6: {
         "ids": [1547024942439206963],  # owner
@@ -100,7 +101,6 @@ SNIPE_FILE = "data/snipe.json"
 ROLE_PERMS_FILE = "data/role_perms.json"
 TEMPROLES_FILE = "data/temproles.json"
 COMMAND_PERMS_FILE = "data/command_perms.json"
-GIFTS_FILE = "data/gifts.json"
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -120,8 +120,6 @@ role_perms = load_json(ROLE_PERMS_FILE, {})
 temproles_data = load_json(TEMPROLES_FILE, [])
 _temprole_tasks = {}
 command_overrides = load_json(COMMAND_PERMS_FILE, {})
-gifts_data = load_json(GIFTS_FILE, {})  # message_id -> gift dict
-_gift_tasks = {}
 
 # Default required perm level per command (overridable via +changeperm)
 DEFAULT_COMMAND_PERMS = {
@@ -133,17 +131,12 @@ DEFAULT_COMMAND_PERMS = {
     "perms": 1,
     "del": 2,  # del sanction
     "rolemembers": 2,
-    "derank": 3,
     "clearwarns": 3,
-    "addrole": 3,
-    "delrole": 3,
+    "derank": 4,
+    "addrole": 4,
+    "delrole": 4,
     "clear": 4,
     "create": 4,
-    "gcreate": 3,   # low tier gw manager+
-    "gend": 3,
-    "greroll": 3,
-    "glist": 3,
-    "gcancel": 4,
     "temprole": 6,
     "syncroles": 6,
     "modstats": 6,
@@ -163,7 +156,6 @@ def save_snipe(): save_json(SNIPE_FILE, snipe_data)
 def save_role_perms(): save_json(ROLE_PERMS_FILE, role_perms)
 def save_temproles(): save_json(TEMPROLES_FILE, temproles_data)
 def save_command_perms(): save_json(COMMAND_PERMS_FILE, command_overrides)
-def save_gifts(): save_json(GIFTS_FILE, gifts_data)
 
 def get_cmd_perm(name: str) -> int:
     key = name.lower().strip()
@@ -276,7 +268,7 @@ async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Streaming(
-            name="SAB giveaways",
+            name="online",
             url="https://www.twitch.tv/discord"
         )
     )
@@ -291,11 +283,6 @@ async def on_ready():
         print(f"Temp roles restored: {len(temproles_data)} pending")
     except Exception as e:
         print(f"Temp role restore failed: {e}")
-    try:
-        await restore_gifts()
-        print(f"Gifts restored: {len([g for g in gifts_data.values() if g.get('active')])} active")
-    except Exception as e:
-        print(f"Gift restore failed: {e}")
 
 # ==================== EVENTS (all the rest) ====================
 @bot.event
@@ -417,15 +404,6 @@ async def on_member_join(member):
         except Exception:
             pass
         return
-
-    # Auto role — members
-    try:
-        role = member.guild.get_role(AUTOROLE_ID)
-        if role and role not in member.roles:
-            await member.add_roles(role, reason="Auto role on join")
-    except Exception as e:
-        print(f"Autorole failed: {e}")
-
     try:
         ch = bot.get_channel(WELCOME_CHANNEL_ID)
         if ch is None:
@@ -1051,37 +1029,27 @@ async def clear(ctx, *args):
         clearing_channels.discard(ctx.channel.id)
 
 def find_role(guild, role_query: str):
-    if not role_query or not guild:
+    if not role_query:
         return None
     q = role_query.strip()
-    # Role mention <@&id>
     if q.startswith("<@&") and q.endswith(">"):
         rid = q[3:-1]
         if rid.isdigit():
             return guild.get_role(int(rid))
-    # Bare role id
     if q.isdigit():
         role = guild.get_role(int(q))
         if role:
             return role
-    # Strip leading @ if user typed @RoleName as text
-    if q.startswith("@"):
-        q = q[1:].strip()
-    if not q:
-        return None
     q_lower = q.lower()
-    # Exact name match
     role = discord.utils.find(lambda r: r.name.lower() == q_lower, guild.roles)
     if role:
         return role
-    # Starts with
     starts = [r for r in guild.roles if r.name.lower().startswith(q_lower) and r.name != "@everyone"]
     if len(starts) == 1:
         return starts[0]
     if len(starts) > 1:
         starts.sort(key=lambda r: len(r.name))
         return starts[0]
-    # Contains
     contains = [r for r in guild.roles if q_lower in r.name.lower() and r.name != "@everyone"]
     if len(contains) == 1:
         return contains[0]
@@ -1089,7 +1057,6 @@ def find_role(guild, role_query: str):
         contains.sort(key=lambda r: (len(r.name), r.name.lower()))
         return contains[0]
     return None
-
 
 @bot.command()
 async def temprole(ctx, *, args: str = None):
@@ -1170,120 +1137,103 @@ async def temprole(ctx, *, args: str = None):
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
-async def _resolve_member_and_role(ctx, args: str):
-    """Resolve target member + role from mentions, reply, ids, or names.
-    Supports: +addrole @user @Role | +addrole @user Role Name | +addrole userid Role
-    """
-    user = None
-    role = None
-    rest = (args or "").strip()
-
-    # Role ping takes priority
-    if ctx.message.role_mentions:
-        role = ctx.message.role_mentions[0]
-        for r in ctx.message.role_mentions:
-            rest = rest.replace(f"<@&{r.id}>", "")
-
-    # User ping
-    if ctx.message.mentions:
-        user = ctx.message.mentions[0]
-        for m in ctx.message.mentions:
-            rest = rest.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
-
-    rest = rest.strip()
-
-    # Reply as target user
-    if user is None and ctx.message.reference:
-        user = await get_target(ctx, None)
-
-    # Still need a role from leftover text
-    if role is None and rest:
-        # Try full rest as role name first
-        role = find_role(ctx.guild, rest)
-        if role is None and user is None:
-            # Maybe: <userid/name> <role...>
-            parts = rest.split(None, 1)
-            if len(parts) >= 2:
-                maybe_user = await get_target(ctx, parts[0])
-                maybe_role = find_role(ctx.guild, parts[1])
-                if maybe_user and maybe_role:
-                    user = maybe_user
-                    role = maybe_role
-                    rest = ""
-                elif maybe_role:
-                    role = maybe_role
-            elif len(parts) == 1 and parts[0].isdigit():
-                # only an id — could be role id
-                role = find_role(ctx.guild, parts[0])
-
-    # Default user = author only if role was found and no user specified
-    if user is None and role is not None and not ctx.message.mentions and not ctx.message.reference:
-        # If rest still looks like a user id we already tried; default to author
-        user = ctx.author
-
-    member = await get_member(ctx.guild, user) if user else None
-    return member, role
-
-
 @bot.command()
 async def addrole(ctx, *, args: str = None):
-    if not has_perm(ctx.author, get_cmd_perm("addrole")) and str(ctx.author.id) not in SPECIAL_USERS:
+    if not has_perm(ctx.author, get_cmd_perm("addrole")):
         return
-    if not args and not ctx.message.role_mentions and not ctx.message.reference:
-        return await ctx.send("Usage: `+addrole @user @Role` or `+addrole @user Role Name`")
-    member, role = await _resolve_member_and_role(ctx, args or "")
+    if not args:
+        return await ctx.send("invalid addrole")
+    user = None
+    role_name = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+        role_name = args
+        for m in ctx.message.mentions:
+            role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+        role_name = role_name.strip()
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        role_name = args.strip()
+    else:
+        parts = args.split(None, 1)
+        if len(parts) >= 1 and parts[0].isdigit() and ctx.guild and ctx.guild.get_member(int(parts[0])):
+            user = await get_target(ctx, parts[0])
+            role_name = parts[1] if len(parts) > 1 else None
+        elif len(parts) == 1 and parts[0].isdigit() and find_role(ctx.guild, parts[0]):
+            user = ctx.author
+            role_name = parts[0]
+        else:
+            user = ctx.author
+            role_name = args.strip()
+    if not user or not role_name:
+        return await ctx.send("invalid addrole")
+    member = await get_member(ctx.guild, user)
     if not member:
-        return await ctx.send("Could not find that member.")
+        return await ctx.send("invalid addrole")
+    role = find_role(ctx.guild, role_name)
     if not role:
-        return await ctx.send("Could not find that role. Ping the role or type its exact name.")
-    # Hierarchy: special / owner / perm 6 can assign any role below the bot
-    is_privileged = (
-        ctx.author.id == ctx.guild.owner_id
-        or str(ctx.author.id) in SPECIAL_USERS
-        or has_perm(ctx.author, 6)
-    )
-    if not is_privileged and role >= ctx.author.top_role:
-        return await ctx.send("That role is equal/higher than your highest role.")
+        return await ctx.send("invalid addrole")
+    # Only Perm 6 / owner / special can assign roles >= their own top role
+    if role >= ctx.author.top_role:
+        if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
+            return await ctx.send("invalid addrole")
     if role >= ctx.guild.me.top_role:
-        return await ctx.send("My role is too low — move my role **above** that role in Server Settings.")
+        return await ctx.send("invalid addrole")
     if role in member.roles:
-        return await ctx.send(f"{member.mention} already has **{role.name}**.")
+        return await ctx.send(f"{member.mention} already has the {role.mention} role.")
     try:
-        await member.add_roles(role, reason=f"addrole by {ctx.author}")
+        await member.add_roles(role)
         await ctx.send("1 role was added to 1 member")
-    except discord.Forbidden:
-        await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
-
 @bot.command()
 async def delrole(ctx, *, args: str = None):
-    if not has_perm(ctx.author, get_cmd_perm("delrole")) and str(ctx.author.id) not in SPECIAL_USERS:
+    if not has_perm(ctx.author, get_cmd_perm("delrole")):
         return
-    if not args and not ctx.message.role_mentions and not ctx.message.reference:
-        return await ctx.send("Usage: `+delrole @user @Role` or `+delrole @user Role Name`")
-    member, role = await _resolve_member_and_role(ctx, args or "")
+    if not args:
+        return await ctx.send("invalid delrole")
+    user = None
+    role_name = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+        role_name = args
+        for m in ctx.message.mentions:
+            role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+        role_name = role_name.strip()
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        role_name = args.strip()
+    else:
+        parts = args.split(None, 1)
+        if len(parts) >= 1 and parts[0].isdigit() and ctx.guild and ctx.guild.get_member(int(parts[0])):
+            user = await get_target(ctx, parts[0])
+            role_name = parts[1] if len(parts) > 1 else None
+        elif len(parts) == 1 and parts[0].isdigit() and find_role(ctx.guild, parts[0]):
+            user = ctx.author
+            role_name = parts[0]
+        else:
+            user = ctx.author
+            role_name = args.strip()
+    if not user or not role_name:
+        return await ctx.send("invalid delrole")
+    member = await get_member(ctx.guild, user)
     if not member:
-        return await ctx.send("Could not find that member.")
+        return await ctx.send("invalid delrole")
+    role = find_role(ctx.guild, role_name)
     if not role:
-        return await ctx.send("Could not find that role. Ping the role or type its exact name.")
-    is_privileged = (
-        ctx.author.id == ctx.guild.owner_id
-        or str(ctx.author.id) in SPECIAL_USERS
-        or has_perm(ctx.author, 6)
-    )
-    if not is_privileged and role >= ctx.author.top_role:
-        return await ctx.send("That role is equal/higher than your highest role.")
+        return await ctx.send("invalid delrole")
+    # Only Perm 6 / owner / special can manage roles >= their own top role
+    if role >= ctx.author.top_role:
+        if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
+            return await ctx.send("invalid delrole")
     if role >= ctx.guild.me.top_role:
-        return await ctx.send("My role is too low — move my role **above** that role in Server Settings.")
+        return await ctx.send("invalid delrole")
     if role not in member.roles:
-        return await ctx.send(f"{member.mention} does not have **{role.name}**.")
+        return await ctx.send(f"{member.mention} does not have the {role.mention} role.")
     try:
-        await member.remove_roles(role, reason=f"delrole by {ctx.author}")
+        await member.remove_roles(role)
         await ctx.send("1 rôle was successfully removed from 1 member")
-    except discord.Forbidden:
-        await ctx.send("Missing permission — need **Manage Roles**, and my role must be above the target role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
@@ -1543,350 +1493,6 @@ async def changeperm(ctx, command: str = None, level: str = None):
     save_command_perms()
     await ctx.send(f"Permission for `{cmd}` set to **Perm {lvl}**.")
 
-# ==================== GIFT HUB ====================
-GIFT_EMOJI = "🎁"
-
-def _gift_key(message_id) -> str:
-    return str(message_id)
-
-async def _build_gift_embed(gift: dict, ended: bool = False) -> discord.Embed:
-    ends_at = gift.get("ends_at")
-    try:
-        ends_dt = datetime.fromisoformat(ends_at) if ends_at else None
-        if ends_dt and ends_dt.tzinfo is None:
-            ends_dt = ends_dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        ends_dt = None
-    winners_n = int(gift.get("winners", 1))
-    prize = gift.get("prize", "Gift")
-    host_id = gift.get("host_id")
-    entries = gift.get("entries", [])
-    title = "🎁 Gift Ended" if ended else "🎁 Gift Giveaway"
-    emb = discord.Embed(title=title, color=0x000000, timestamp=datetime.now(timezone.utc))
-    emb.add_field(name="Prize", value=prize, inline=False)
-    emb.add_field(name="Winners", value=str(winners_n), inline=True)
-    emb.add_field(name="Entries", value=str(len(entries)), inline=True)
-    if host_id:
-        emb.add_field(name="Hosted by", value=f"<@{host_id}>", inline=True)
-    if ends_dt and not ended:
-        emb.add_field(name="Ends", value=discord.utils.format_dt(ends_dt, "R"), inline=False)
-        emb.description = f"React with {GIFT_EMOJI} to enter!"
-    if ended:
-        winner_ids = gift.get("winner_ids") or []
-        if winner_ids:
-            mentions = ", ".join(f"<@{w}>" for w in winner_ids)
-            emb.add_field(name="Winner(s)", value=mentions, inline=False)
-        else:
-            emb.add_field(name="Winner(s)", value="No valid entries", inline=False)
-    emb.set_footer(text="Founder: Raynox • Bot maker: Teix • Gift Hub")
-    return emb
-
-def _pick_winners(entries: list, count: int, exclude: list = None) -> list:
-    import random
-    pool = list(dict.fromkeys(entries))  # unique, preserve order then shuffle
-    if exclude:
-        exclude_set = set(str(x) for x in exclude)
-        pool = [e for e in pool if str(e) not in exclude_set]
-    if not pool:
-        return []
-    random.shuffle(pool)
-    return pool[: max(1, min(count, len(pool)))]
-
-async def _end_gift(message_id: str, cancelled: bool = False):
-    gift = gifts_data.get(str(message_id))
-    if not gift or not gift.get("active"):
-        return
-    gift["active"] = False
-    key = _gift_key(message_id)
-    task = _gift_tasks.pop(key, None)
-    if task and not task.done():
-        task.cancel()
-
-    channel_id = gift.get("channel_id")
-    guild_id = gift.get("guild_id")
-    winners_n = int(gift.get("winners", 1))
-    entries = list(gift.get("entries") or [])
-
-    if cancelled:
-        gift["winner_ids"] = []
-        gift["cancelled"] = True
-    else:
-        gift["winner_ids"] = _pick_winners(entries, winners_n)
-        gift["cancelled"] = False
-
-    save_gifts()
-
-    ch = bot.get_channel(channel_id) if channel_id else None
-    if ch is None and channel_id:
-        try:
-            ch = await bot.fetch_channel(channel_id)
-        except Exception:
-            ch = None
-    if not ch:
-        return
-    try:
-        msg = await ch.fetch_message(int(message_id))
-    except Exception:
-        msg = None
-
-    emb = await _build_gift_embed(gift, ended=True)
-    if cancelled:
-        emb.title = "🎁 Gift Cancelled"
-        emb.color = 0x000000
-    if msg:
-        try:
-            await msg.edit(embed=emb)
-        except Exception:
-            pass
-        try:
-            await msg.clear_reactions()
-        except Exception:
-            pass
-
-    if not cancelled and gift.get("winner_ids"):
-        mentions = ", ".join(f"<@{w}>" for w in gift["winner_ids"])
-        try:
-            await ch.send(
-                f"🎉 Congratulations {mentions}! You won **{gift.get('prize', 'the gift')}**!\n"
-                f"Host: <@{gift.get('host_id')}> — please arrange delivery."
-            )
-        except Exception:
-            pass
-    elif not cancelled:
-        try:
-            await ch.send("🎁 Gift ended with no valid entries.")
-        except Exception:
-            pass
-
-def schedule_gift_end(message_id: str, ends_at: datetime):
-    import asyncio
-    key = _gift_key(message_id)
-    old = _gift_tasks.pop(key, None)
-    if old and not old.done():
-        old.cancel()
-    now = datetime.now(timezone.utc)
-    if ends_at.tzinfo is None:
-        ends_at = ends_at.replace(tzinfo=timezone.utc)
-    delay = max(0, (ends_at - now).total_seconds())
-
-    async def _runner():
-        try:
-            await asyncio.sleep(delay)
-            await _end_gift(message_id)
-        except asyncio.CancelledError:
-            return
-
-    _gift_tasks[key] = asyncio.create_task(_runner())
-
-async def restore_gifts():
-    now = datetime.now(timezone.utc)
-    for mid, gift in list(gifts_data.items()):
-        if not gift.get("active"):
-            continue
-        try:
-            ends = datetime.fromisoformat(gift["ends_at"])
-            if ends.tzinfo is None:
-                ends = ends.replace(tzinfo=timezone.utc)
-            if ends <= now:
-                await _end_gift(mid)
-            else:
-                schedule_gift_end(mid, ends)
-        except Exception as e:
-            print(f"gift restore error {mid}: {e}")
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.user_id == (bot.user.id if bot.user else None):
-        return
-    if str(payload.emoji) != GIFT_EMOJI and getattr(payload.emoji, "name", None) != "🎁":
-        return
-    mid = str(payload.message_id)
-    gift = gifts_data.get(mid)
-    if not gift or not gift.get("active"):
-        return
-    if payload.guild_id and gift.get("guild_id") and int(gift["guild_id"]) != payload.guild_id:
-        return
-    uid = str(payload.user_id)
-    entries = gift.setdefault("entries", [])
-    if uid not in entries:
-        entries.append(uid)
-        save_gifts()
-
-@bot.event
-async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    if str(payload.emoji) != GIFT_EMOJI and getattr(payload.emoji, "name", None) != "🎁":
-        return
-    mid = str(payload.message_id)
-    gift = gifts_data.get(mid)
-    if not gift or not gift.get("active"):
-        return
-    uid = str(payload.user_id)
-    entries = gift.get("entries") or []
-    if uid in entries:
-        gift["entries"] = [e for e in entries if e != uid]
-        save_gifts()
-
-@bot.command(aliases=["gstart", "giveaway"])
-async def gcreate(ctx, duration: str = None, winners: str = "1", *, prize: str = None):
-    """Create a gift: +gcreate <duration> [winners] <prize>
-    Example: +gcreate 1h 1 Nitro Classic
-    """
-    if not has_perm(ctx.author, get_cmd_perm("gcreate")) and str(ctx.author.id) not in SPECIAL_USERS:
-        return
-    if not duration or not prize:
-        return await ctx.send("Usage: `+gcreate <duration> [winners] <prize>`\nExample: `+gcreate 30m 1 Discord Nitro`")
-    delta = parse_duration(duration)
-    if not delta or delta.total_seconds() < 10:
-        return await ctx.send("Invalid duration (examples: `30s` `10m` `1h` `7d`)")
-    try:
-        winners_n = int(winners)
-        if winners_n < 1 or winners_n > 20:
-            raise ValueError()
-    except Exception:
-        # winners omitted — treat winners token as part of prize
-        prize = f"{winners} {prize}".strip()
-        winners_n = 1
-    ends_at = datetime.now(timezone.utc) + delta
-    gift_stub = {
-        "prize": prize,
-        "winners": winners_n,
-        "host_id": ctx.author.id,
-        "entries": [],
-        "ends_at": ends_at.isoformat(),
-        "active": True,
-        "channel_id": ctx.channel.id,
-        "guild_id": ctx.guild.id if ctx.guild else None,
-        "winner_ids": [],
-    }
-    emb = await _build_gift_embed(gift_stub, ended=False)
-    msg = await ctx.send(embed=emb)
-    try:
-        await msg.add_reaction(GIFT_EMOJI)
-    except Exception:
-        pass
-    gift_stub["message_id"] = msg.id
-    gifts_data[str(msg.id)] = gift_stub
-    save_gifts()
-    schedule_gift_end(str(msg.id), ends_at)
-    try:
-        await ctx.message.delete()
-    except Exception:
-        pass
-
-@bot.command()
-async def gend(ctx, message_id: str = None):
-    """End a gift early and pick winners. Reply to the gift or pass message ID."""
-    if not has_perm(ctx.author, get_cmd_perm("gend")) and str(ctx.author.id) not in SPECIAL_USERS:
-        return
-    mid = None
-    if ctx.message.reference and ctx.message.reference.message_id:
-        mid = str(ctx.message.reference.message_id)
-    elif message_id and message_id.isdigit():
-        mid = message_id.strip()
-    if not mid or mid not in gifts_data:
-        return await ctx.send("Reply to a gift message or use `+gend <message_id>`")
-    gift = gifts_data[mid]
-    if not gift.get("active"):
-        return await ctx.send("That gift is already ended.")
-    await _end_gift(mid)
-    await ctx.send("Gift ended and winners picked.")
-
-@bot.command()
-async def gcancel(ctx, message_id: str = None):
-    """Cancel a gift without picking winners."""
-    if not has_perm(ctx.author, get_cmd_perm("gcancel")) and str(ctx.author.id) not in SPECIAL_USERS:
-        return
-    mid = None
-    if ctx.message.reference and ctx.message.reference.message_id:
-        mid = str(ctx.message.reference.message_id)
-    elif message_id and message_id.isdigit():
-        mid = message_id.strip()
-    if not mid or mid not in gifts_data:
-        return await ctx.send("Reply to a gift message or use `+gcancel <message_id>`")
-    gift = gifts_data[mid]
-    if not gift.get("active"):
-        return await ctx.send("That gift is already ended.")
-    await _end_gift(mid, cancelled=True)
-    await ctx.send("Gift cancelled.")
-
-@bot.command()
-async def greroll(ctx, message_id: str = None):
-    """Reroll winner(s) for an ended gift. Reply to the gift or pass message ID."""
-    if not has_perm(ctx.author, get_cmd_perm("greroll")) and str(ctx.author.id) not in SPECIAL_USERS:
-        return
-    mid = None
-    if ctx.message.reference and ctx.message.reference.message_id:
-        mid = str(ctx.message.reference.message_id)
-    elif message_id and message_id.isdigit():
-        mid = message_id.strip()
-    if not mid or mid not in gifts_data:
-        return await ctx.send("Reply to a gift message or use `+greroll <message_id>`")
-    gift = gifts_data[mid]
-    if gift.get("active"):
-        return await ctx.send("Gift is still active — use `+gend` first.")
-    entries = list(gift.get("entries") or [])
-    winners_n = int(gift.get("winners", 1))
-    old = list(gift.get("winner_ids") or [])
-    new_winners = _pick_winners(entries, winners_n, exclude=old)
-    if not new_winners:
-        # if no one left excluding old, pick from all
-        new_winners = _pick_winners(entries, winners_n)
-    if not new_winners:
-        return await ctx.send("No entries to reroll.")
-    gift["winner_ids"] = new_winners
-    save_gifts()
-    emb = await _build_gift_embed(gift, ended=True)
-    emb.title = "🎁 Gift Rerolled"
-    ch = bot.get_channel(gift.get("channel_id"))
-    if ch is None and gift.get("channel_id"):
-        try:
-            ch = await bot.fetch_channel(gift["channel_id"])
-        except Exception:
-            ch = None
-    if ch:
-        try:
-            msg = await ch.fetch_message(int(mid))
-            await msg.edit(embed=emb)
-        except Exception:
-            pass
-        mentions = ", ".join(f"<@{w}>" for w in new_winners)
-        await ch.send(
-            f"🔄 Reroll! New winner(s): {mentions} — **{gift.get('prize', 'gift')}**"
-        )
-    await ctx.send("Rerolled.")
-
-@bot.command()
-async def glist(ctx):
-    """List active gifts in this server."""
-    if not has_perm(ctx.author, get_cmd_perm("glist")) and str(ctx.author.id) not in SPECIAL_USERS:
-        return
-    active = []
-    gid = ctx.guild.id if ctx.guild else None
-    for mid, g in gifts_data.items():
-        if not g.get("active"):
-            continue
-        if gid and g.get("guild_id") and int(g["guild_id"]) != gid:
-            continue
-        active.append((mid, g))
-    if not active:
-        return await ctx.send("No active gifts.")
-    lines = []
-    for mid, g in active[:20]:
-        prize = g.get("prize", "?")
-        entries = len(g.get("entries") or [])
-        ends = g.get("ends_at", "")
-        try:
-            ends_dt = datetime.fromisoformat(ends)
-            if ends_dt.tzinfo is None:
-                ends_dt = ends_dt.replace(tzinfo=timezone.utc)
-            ends_txt = discord.utils.format_dt(ends_dt, "R")
-        except Exception:
-            ends_txt = ends
-        lines.append(f"**{prize}** — `{mid}` — {entries} entries — ends {ends_txt}")
-    emb = discord.Embed(title="Active Gifts", description="\n".join(lines), color=0x000000)
-    emb.set_footer(text="Founder: Raynox • Bot maker: Teix • Gift Hub")
-    await ctx.send(embed=emb)
-
 @bot.command()
 async def help(ctx):
     emb = discord.Embed(
@@ -1896,18 +1502,6 @@ async def help(ctx):
             "Prefix: `+`\n"
             "You can **reply** to a message instead of mentioning the user."
         )
-    )
-    emb.add_field(
-        name="🎁 Gift Hub (Perm 3+)",
-        value=(
-            "`+gcreate <duration> [winners] <prize>` — start a gift\n"
-            "`+gend [message_id]` — end gift & pick winners (or reply)\n"
-            "`+greroll [message_id]` — reroll winners (or reply)\n"
-            "`+glist` — list active gifts\n"
-            "`+gcancel [message_id]` — cancel gift (Perm 4+)\n"
-            "Example: `+gcreate 1h 1 Discord Nitro`"
-        ),
-        inline=False
     )
     emb.add_field(
         name="Perm 1",
@@ -1921,12 +1515,12 @@ async def help(ctx):
     )
     emb.add_field(
         name="Perm 3",
-        value="`+derank <member>` `+clearwarns <member>` `+addrole <member> <role>` `+delrole <member> <role>`",
+        value="`+clearwarns <member>`",
         inline=False
     )
     emb.add_field(
         name="Perm 4",
-        value="`+clear [number] [member]` `+create [emoji] [name]`",
+        value="`+clear [number] [member]` `+create [emoji] [name]` `+derank <member>` `+addrole <member> <role>` `+delrole <member> <role>`",
         inline=False
     )
     emb.add_field(
@@ -1949,7 +1543,7 @@ async def help(ctx):
         value="`+userinfo` `+serverinfo` `+snipe` `+ping`",
         inline=False
     )
-    emb.set_footer(text="Founder: Raynox • Bot maker: Teix")
+    emb.set_footer(text="Moderation bot")
     await ctx.send(embed=emb)
 
 def censor_blacklisted(text: str) -> str:
