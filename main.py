@@ -6,9 +6,13 @@ from datetime import datetime, timedelta, timezone
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import asyncio
 
 # ==================== CONFIG ====================
-TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN environment variable is not set")
+
 PREFIX = "+"
 WELCOME_CHANNEL_ID = 1547032394136031293
 
@@ -21,20 +25,11 @@ SPECIAL_USERS = [
     "1263900802083459227",
 ]
 
-# +ban +unban only (special users)
 BAN_COMMAND_USERS = list(SPECIAL_USERS)
-
-# +kick only (special users)
 KICK_COMMAND_USERS = list(SPECIAL_USERS)
-
-# +bl +unbl only (special users)
 BL_COMMAND_USERS = list(SPECIAL_USERS)
 
-# Role IDs for permission levels.
-# After the bot finds them, it saves the ROLE IDs — so if you rename a role,
-# permissions still work without updating this list.
 ROLES = {
-    # Perm level -> role IDs (primary) + optional names (display / fallback only)
     1: {
         "ids": [1547030963031380019],  # idea helper
         "names": ["idea helper"],
@@ -69,18 +64,14 @@ ROLES = {
 }
 
 BLACKLISTED_WORDS = [
-    # slurs / hate
     "nigger", "nigga", "faggot", "fag", "tranny", "retard", "retarded",
     "nazi", "hitler", "kike", "chink", "spic", "coon", "beaner",
-    # sexual / crude
     "femboy", "d*ck", "dick", "cock", "pussy", "whore", "slut", "hoe",
     "porn", "nudes", "onlyfans",
-    # self-harm / threats
     "kys", "kill yourself", "kill urself", "hang yourself", "go die",
     "neck yourself", "end yourself",
 ]
 
-# Scam / nitro bait — separate message + sanction reason "link"
 SCAM_WORDS = [
     "free nitro", "discord.gift", "steamcommunity.com/gift",
     "free nitro giveaway", "nitro gift", "claim nitro",
@@ -122,7 +113,6 @@ temproles_data = load_json(TEMPROLES_FILE, [])
 _temprole_tasks = {}
 command_overrides = load_json(COMMAND_PERMS_FILE, {})
 
-# Default required perm level per command (overridable via +changeperm)
 DEFAULT_COMMAND_PERMS = {
     "warn": 1,
     "tempmute": 1,
@@ -130,7 +120,7 @@ DEFAULT_COMMAND_PERMS = {
     "mutelist": 1,
     "sanctions": 1,
     "perms": 1,
-    "del": 2,  # del sanction
+    "del": 2,
     "rolemembers": 2,
     "clearwarns": 3,
     "derank": 4,
@@ -144,7 +134,7 @@ DEFAULT_COMMAND_PERMS = {
     "banlist": 5,
     "baninfo": 5,
     "changeperm": 6,
-    "ban": 99,  # special users only (handled separately)
+    "ban": 99,
     "unban": 99,
     "kick": 99,
     "bl": 99,
@@ -163,7 +153,7 @@ def get_cmd_perm(name: str) -> int:
     if key in command_overrides:
         val = command_overrides[key]
         if val is None or str(val).lower() == "none":
-            return 99  # effectively disabled / special only
+            return 99
         try:
             return int(val)
         except Exception:
@@ -248,13 +238,10 @@ def can_moderate(moderator: discord.Member, target: discord.Member) -> bool:
         return False
     mod_level = get_perm_level(moderator)
     target_level = get_perm_level(target)
-    # Regular members (no staff role) can always be moderated by staff
     if target_level == 0:
         return True
-    # Staff targets: mod must have strictly higher perm level
     if mod_level <= target_level:
         return False
-    # Also respect Discord role hierarchy between staff
     try:
         if moderator.top_role <= target.top_role:
             return False
@@ -269,7 +256,7 @@ async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Streaming(
-            name="online",
+            name="SAB Giveaways",
             url="https://www.twitch.tv/discord"
         )
     )
@@ -285,7 +272,6 @@ async def on_ready():
     except Exception as e:
         print(f"Temp role restore failed: {e}")
 
-# ==================== EVENTS (all the rest) ====================
 @bot.event
 async def on_message_delete(message):
     if message.author.bot or not message.guild:
@@ -337,9 +323,6 @@ async def filter_bad_content(message) -> bool:
     async def _warn_and_cleanup(text: str):
         try:
             warn_msg = await message.channel.send(text)
-        except Exception:
-            return
-        try:
             await warn_msg.delete(delay=3)
         except Exception:
             pass
@@ -356,6 +339,7 @@ async def filter_bad_content(message) -> bool:
             emb.add_field(name="User", value=f"{message.author} (`{message.author.id}`)")
             emb.add_field(name="Matched", value=word)
             emb.add_field(name="Message", value=f"```{content[:800]}```", inline=False)
+            emb.set_footer(text="SAB Giveaways • Bot by RayNox")
             await send_log(emb)
             return True
 
@@ -371,6 +355,7 @@ async def filter_bad_content(message) -> bool:
             emb.add_field(name="User", value=f"{message.author} (`{message.author.id}`)")
             emb.add_field(name="Word", value=word)
             emb.add_field(name="Message", value=f"```{content[:800]}```", inline=False)
+            emb.set_footer(text="SAB Giveaways • Bot by RayNox")
             await send_log(emb)
             return True
 
@@ -419,25 +404,16 @@ async def on_member_join(member):
             color=0x000000,
             timestamp=datetime.now(timezone.utc),
         )
-        emb.add_field(
-            name="Account Created",
-            value=discord.utils.format_dt(member.created_at, "R"),
-            inline=True,
-        )
-        emb.add_field(
-            name="Member Count",
-            value=f"#{count}",
-            inline=True,
-        )
+        emb.add_field(name="Account Created", value=discord.utils.format_dt(member.created_at, "R"), inline=True)
+        emb.add_field(name="Member Count", value=f"#{count}", inline=True)
         emb.set_thumbnail(url=member.display_avatar.url)
-        emb.set_footer(text="Founder: Raynox • Bot maker: Teix")
+        emb.set_footer(text="SAB Giveaways • Bot by RayNox")
         await ch.send(embed=emb)
     except Exception as e:
         print(f"Welcome message failed: {e}")
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # ---------- TIMEOUT TRACKING ----------
     try:
         before_to = before.timed_out_until
         after_to = after.timed_out_until
@@ -524,7 +500,7 @@ async def perms(ctx):
         if level == 6:
             value += "\n\n**Highest staff — access to advanced commands**"
         emb.add_field(name=f"Perm {level}", value=value, inline=False)
-    emb.set_footer(text="Role IDs are saved — renaming a role will not break perms. Use +syncroles to rescan names.")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -545,7 +521,7 @@ async def syncroles(ctx):
         description="\n".join(lines) or "No roles matched.",
         color=0x000000
     )
-    emb.set_footer(text="Saved role IDs. Renaming these roles will still keep the same perms.")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -572,12 +548,12 @@ async def snipe(ctx):
         emb.set_image(url=data["image_url"])
     other = []
     for att in data.get("attachments") or []:
-        is_img = (att.get("content_type") or "").startswith("image/") or att.get("filename", "").lower().endswith(((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")))
+        is_img = (att.get("content_type") or "").startswith("image/") or att.get("filename", "").lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
         if not is_img and att.get("url"):
             other.append(f"[{att.get('filename', 'file')}]({att['url']})")
     if other:
         emb.add_field(name="Files", value="\n".join(other[:5]), inline=False)
-    emb.set_footer(text="Snipe")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command(aliases=["warns"])
@@ -602,30 +578,50 @@ async def sanctions(ctx, target: str = None):
             if user is None:
                 user = ctx.author
             uid = str(user.id)
+
         if not uid:
             return await ctx.send("invalid sanctions")
+
         lst = sanctions_data.get(str(uid), [])
-        display = str(user) if user else f"User `{uid}`"
+        avatar = getattr(getattr(user, "display_avatar", None), "url", None) if user else None
+
+        # ========== NO SANCTIONS (exact style from your screenshot) ==========
         if not lst:
-            return await empty_result(ctx, f"**{display}** has no sanctions.")
-        # Newest first, renumber 1, 2, 3... (Crow Bots style)
+            emb = discord.Embed(
+                description="No sanctions received",
+                color=0x000000
+            )
+            if user:
+                emb.set_author(name=str(user), icon_url=avatar)
+            else:
+                emb.set_author(name=f"User {uid}")
+            emb.set_footer(text="SAB Giveaways • Bot by RayNox")
+            await ctx.send(embed=emb)
+            return
+
+        # ========== HAS SANCTIONS ==========
         ordered = list(reversed(lst))
         lines = []
         for i, s in enumerate(ordered, 1):
             date = s.get("date", "?")
             reason = s.get("reason", "No reason")
-            lines.append(f"{i} - {date}: {reason}")
+            lines.append(f"**{i}.** {date} — {reason}")
+
         text = "\n".join(lines)
         if len(text) > 4000:
             text = text[:4000] + "\n..."
-        emb = discord.Embed(description=text, color=0x000000)
-        if user is not None:
-            avatar = getattr(getattr(user, "display_avatar", None), "url", None)
+
+        emb = discord.Embed(
+            description=text,
+            color=0x000000
+        )
+        if user:
             emb.set_author(name=str(user), icon_url=avatar)
         else:
             emb.set_author(name=f"User {uid}")
-        emb.set_footer(text="Sanctions")
+        emb.set_footer(text="SAB Giveaways • Bot by RayNox")
         await ctx.send(embed=emb)
+
     except Exception as e:
         await ctx.send(f"Failed to load sanctions: `{e}`")
 
@@ -667,6 +663,7 @@ async def del_sanction(ctx, action: str = None, arg1: str = None, arg2: str = No
     log.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
     log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
     log.add_field(name="Deleted", value=f"{deleted['date']}: {deleted['reason']}", inline=False)
+    log.set_footer(text="SAB Giveaways • Bot by RayNox")
     await send_log(log)
 
 @bot.command()
@@ -700,11 +697,13 @@ async def warn(ctx, *, args: str = None):
         return await ctx.send("You can't warn someone with an equal or higher rank.")
     add_sanction(user.id, reason, ctx.author.id)
     emb = discord.Embed(title="warn", description=f"{user.mention} was warned\nreason: {reason}", color=0x000000)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
     log = discord.Embed(title="Warn", color=0x000000, timestamp=datetime.now())
     log.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
     log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
     log.add_field(name="Reason", value=reason, inline=False)
+    log.set_footer(text="SAB Giveaways • Bot by RayNox")
     await send_log(log)
 
 @bot.command()
@@ -723,6 +722,7 @@ async def clearwarns(ctx, target: str = None):
     log = discord.Embed(title="Clear Warns", color=0x000000, timestamp=datetime.now())
     log.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
     log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
+    log.set_footer(text="SAB Giveaways • Bot by RayNox")
     await send_log(log)
 
 @bot.command()
@@ -780,6 +780,7 @@ async def tempmute(ctx, *, args: str = None):
         log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
         log.add_field(name="Duration", value=duration, inline=True)
         log.add_field(name="Reason", value=reason, inline=True)
+        log.set_footer(text="SAB Giveaways • Bot by RayNox")
         await send_log(log)
     except discord.Forbidden:
         await ctx.send("Missing permissions: move my role **above** the target's role and enable **Timeout Members** for me.")
@@ -804,6 +805,7 @@ async def unmute(ctx, target: str = None):
         log = discord.Embed(title="Unmute", color=0x000000, timestamp=datetime.now())
         log.add_field(name="User", value=f"{member} (`{member.id}`)", inline=False)
         log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
+        log.set_footer(text="SAB Giveaways • Bot by RayNox")
         await send_log(log)
     except Exception as e:
         await ctx.send(f"Failed to unmute: {e}")
@@ -837,21 +839,16 @@ async def mutelist(ctx):
     not_shown = len(muted) - max_show
     if not_shown > 0:
         description += f"\n{not_shown} not showed"
-    emb = discord.Embed(
-        title="Current mutes",
-        description=description,
-        color=0x000000
-    )
+    emb = discord.Embed(title="Current mutes", description=description, color=0x000000)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
 async def ban(ctx, *, args: str = None):
     if str(ctx.author.id) not in BAN_COMMAND_USERS:
         return
-
     user = None
     reason = "No reason"
-
     if ctx.message.mentions:
         user = ctx.message.mentions[0]
         if args:
@@ -868,22 +865,16 @@ async def ban(ctx, *, args: str = None):
         user = await get_target(ctx, parts[0])
         if user and len(parts) > 1:
             reason = parts[1]
-        elif not user:
-            pass
-
     if not user:
         return await ctx.send("invalid ban")
     if user.id == ctx.author.id:
         return await ctx.send("invalid ban")
-
     try:
         await ctx.guild.ban(user, reason=reason)
-
         if reason and reason != "No reason":
             await ctx.send(f"Banned **{user}** | Reason: {reason}")
         else:
             await ctx.send(f"Banned **{user}**")
-
     except discord.Forbidden:
         await ctx.send("I don't have permission to ban that user (check my role position + Ban Members permission).")
     except Exception as e:
@@ -895,21 +886,16 @@ async def unban(ctx, user_id: str = None):
         return
     if not user_id:
         return await ctx.send("invalid unban")
-
-    # Clean the ID (supports raw ID or mention)
     raw = user_id.strip().replace("<@", "").replace("!", "").replace(">", "")
     if not raw.isdigit():
         return await ctx.send("invalid unban")
-
     try:
         user = await bot.fetch_user(int(raw))
     except (ValueError, discord.NotFound, discord.HTTPException):
         return await ctx.send("invalid unban")
-
     try:
         await ctx.guild.unban(user)
         await ctx.send(f"Unbanned **{user}**")
-
     except discord.NotFound:
         await ctx.send("This user is not banned.")
     except discord.Forbidden:
@@ -1113,7 +1099,6 @@ async def temprole(ctx, *, args: str = None):
     role = find_role(ctx.guild, role_name)
     if not role:
         return await ctx.send("invalid temprole")
-    # Only Perm 6 / owner / special can assign roles >= their own top role
     if role >= ctx.author.top_role:
         if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
             return await ctx.send("invalid temprole")
@@ -1134,6 +1119,7 @@ async def temprole(ctx, *, args: str = None):
         log.add_field(name="Moderator", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
         log.add_field(name="Role", value=f"{role.name} (`{role.id}`)", inline=True)
         log.add_field(name="Duration", value=duration, inline=True)
+        log.set_footer(text="SAB Giveaways • Bot by RayNox")
         await send_log(log)
     except Exception as e:
         await ctx.send(f"Failed: {e}")
@@ -1174,7 +1160,6 @@ async def addrole(ctx, *, args: str = None):
     role = find_role(ctx.guild, role_name)
     if not role:
         return await ctx.send("invalid addrole")
-    # Only Perm 6 / owner / special can assign roles >= their own top role
     if role >= ctx.author.top_role:
         if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
             return await ctx.send("invalid addrole")
@@ -1224,7 +1209,6 @@ async def delrole(ctx, *, args: str = None):
     role = find_role(ctx.guild, role_name)
     if not role:
         return await ctx.send("invalid delrole")
-    # Only Perm 6 / owner / special can manage roles >= their own top role
     if role >= ctx.author.top_role:
         if ctx.author.id != ctx.guild.owner_id and str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
             return await ctx.send("invalid delrole")
@@ -1250,7 +1234,6 @@ async def derank(ctx, target: str = None):
     member = await get_member(ctx.guild, user)
     if not member:
         return await ctx.send("invalid derank")
-    # INSTANTLY remove ALL roles (no delay, no staff log embed, no cooldown)
     try:
         roles = [r for r in member.roles if r != ctx.guild.default_role and not r.managed]
         await member.remove_roles(*roles)
@@ -1301,7 +1284,9 @@ async def rolemembers(ctx, *, role_query: str = None):
         color=0x000000
     )
     if len(members) > 30:
-        emb.set_footer(text=f"Showing 30/{len(members)}")
+        emb.set_footer(text=f"Showing 30/{len(members)} • SAB Giveaways • Bot by RayNox")
+    else:
+        emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1343,6 +1328,7 @@ async def bl(ctx, *, args: str = None):
     else:
         desc = f"{user.mention} banned and blacklisted"
     emb = discord.Embed(title="blacklist", description=desc, color=0x000000)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1376,6 +1362,7 @@ async def userinfo(ctx, target: str = None):
     emb.add_field(name="Created", value=discord.utils.format_dt(user.created_at, "R"), inline=True)
     if member:
         emb.add_field(name="Joined", value=discord.utils.format_dt(member.joined_at, "R"), inline=True)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1387,13 +1374,13 @@ async def serverinfo(ctx):
     emb.add_field(name="Owner", value=f"<@{g.owner_id}>", inline=True)
     emb.add_field(name="Members", value=g.member_count, inline=True)
     emb.add_field(name="Created", value=discord.utils.format_dt(g.created_at, "R"), inline=True)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
 async def modstats(ctx):
     if not has_perm(ctx.author, get_cmd_perm("modstats")):
         return
-    # Count sanctions issued by each moderator
     counts = {}
     for uid, entries in sanctions_data.items():
         for s in entries:
@@ -1412,7 +1399,7 @@ async def modstats(ctx):
         color=0x000000,
         timestamp=datetime.now(timezone.utc),
     )
-    emb.set_footer(text="Based on recorded sanctions / warns / timeouts")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1439,8 +1426,7 @@ async def banlist(ctx):
         description="\n\n".join(lines),
         color=0x000000,
     )
-    if len(bans) >= 50:
-        emb.set_footer(text="Showing up to 50 most recent bans")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1463,6 +1449,7 @@ async def baninfo(ctx, target: str = None):
     emb.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
     emb.add_field(name="Reason", value=ban_entry.reason or "No reason", inline=False)
     emb.set_thumbnail(url=user.display_avatar.url)
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -1472,13 +1459,10 @@ async def changeperm(ctx, command: str = None, level: str = None):
     if not command or level is None:
         return await ctx.send("Usage: `+changeperm <command> <level|none>`\nExample: `+changeperm warn 2` or `+changeperm clear none`")
     cmd = command.lower().strip()
-    # Normalize aliases
     if cmd in ("warns",):
         cmd = "sanctions"
     if cmd in ("del sanction", "delsanction"):
         cmd = "del"
-    valid_cmds = set(DEFAULT_COMMAND_PERMS.keys()) | set(command_overrides.keys())
-    # Allow setting for known commands
     if level.lower() in ("none", "off", "disable", "disabled"):
         command_overrides[cmd] = "none"
         save_command_perms()
@@ -1544,7 +1528,7 @@ async def help(ctx):
         value="`+userinfo` `+serverinfo` `+snipe` `+ping`",
         inline=False
     )
-    emb.set_footer(text="Moderation bot")
+    emb.set_footer(text="SAB Giveaways • Bot by RayNox")
     await ctx.send(embed=emb)
 
 def censor_blacklisted(text: str) -> str:
@@ -1606,12 +1590,12 @@ async def _remove_temprole(guild_id: int, user_id: int, role_id: int):
         log = discord.Embed(title="Temp Role Expired", color=0x000000, timestamp=datetime.now())
         log.add_field(name="User", value=f"{member} (`{member.id}`)", inline=False)
         log.add_field(name="Role", value=f"{role.name} (`{role.id}`)", inline=False)
+        log.set_footer(text="SAB Giveaways • Bot by RayNox")
         await send_log(log)
     except Exception:
         pass
 
 def schedule_temprole(guild_id: int, user_id: int, role_id: int, ends_at: datetime):
-    import asyncio
     key = _temprole_key(guild_id, user_id, role_id)
     old = _temprole_tasks.pop(key, None)
     if old and not old.done():
@@ -1641,7 +1625,6 @@ def schedule_temprole(guild_id: int, user_id: int, role_id: int, ends_at: dateti
     save_temproles()
 
 async def restore_temproles():
-    import asyncio
     now = datetime.now(timezone.utc)
     pending = list(temproles_data)
     for entry in pending:
@@ -1660,7 +1643,7 @@ async def restore_temproles():
             print(f"temprole restore error: {e}")
 
 async def send_log(embed: discord.Embed):
-    return
+    return  # No log channel defined
 
 def add_sanction(user_id: int, reason: str, mod_id: int):
     uid = str(user_id)
@@ -1735,7 +1718,9 @@ async def get_member(guild: discord.Guild, user):
 
 async def empty_result(ctx, text: str):
     try:
-        msg = await ctx.send(text)
+        emb = discord.Embed(description=text, color=0x000000)
+        emb.set_footer(text="SAB Giveaways • Bot by RayNox")
+        msg = await ctx.send(embed=emb)
     except Exception:
         msg = None
     try:
@@ -1744,10 +1729,9 @@ async def empty_result(ctx, text: str):
         pass
     if msg:
         try:
-            await msg.delete()
+            await msg.delete(delay=5)
         except Exception:
             pass
-
 
 # ==================== KEEP-ALIVE ====================
 class _HealthHandler(BaseHTTPRequestHandler):
